@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-VOCAB_SIZE = 10+3 # all digits plus =, +, end_token
+VOCAB_SIZE = 10+3 # all digits plus =, +, end_token: ' '
 DIGITS: int = 5
 MAX_NUMBER: int = 10**(DIGITS)-1
 MAX_TRAIN_NUMBER: int = 10**(DIGITS-1)-1
@@ -16,7 +16,7 @@ ATTENTION_HEADS = 8
 ATTENTION_BLOCKS = 6
 ATTENTION_EMBEDDING_DIM = EMBEDDING_DIM // ATTENTION_HEADS
 
-EPOCHS = 30
+EPOCHS = 20
 STEPS_PER_EPOCH = 10**3
 BATCH_SIZE = 10
 
@@ -113,14 +113,14 @@ class MultiHeadAttention(nn.Module):
         k = self.to_key(x)
         v = self.to_value(x)
 
-        # split up into heads
+        # split up into heads:: BSxSLxAHxAED --> BSxAHxSLxAED
         q = q.view(BATCH_SIZE, SENTENCE_LENGTH, ATTENTION_HEADS, ATTENTION_EMBEDDING_DIM).movedim(1,2)
         k = k.view(BATCH_SIZE, SENTENCE_LENGTH, ATTENTION_HEADS, ATTENTION_EMBEDDING_DIM).movedim(1,2)
         v = v.view(BATCH_SIZE, SENTENCE_LENGTH, ATTENTION_HEADS, ATTENTION_EMBEDDING_DIM).movedim(1,2)
 
         k = k.transpose(-2,-1)
         attention_matrix = torch.matmul(q, k) / np.sqrt(float(ATTENTION_EMBEDDING_DIM))
-        attention_matrix.masked_fill(self.mask, -torch.inf)
+        attention_matrix = attention_matrix.masked_fill(self.mask, -torch.inf)
         weights = F.softmax(attention_matrix, -1)
 
         x = torch.matmul(weights, v)
@@ -180,14 +180,14 @@ for epoch in range(EPOCHS):
         input, target = get_batch(train_numbers, BATCH_SIZE)
         probs, loss = cpt(input, target)
 
-        # now, since we dont want to regress before the = sign: crop it like its hot
         loss = loss.view(BATCH_SIZE, SENTENCE_LENGTH)
-        loss = loss[:,DIGITS*2+1:] # we evaluate from the = to the " " (which should always be fixed)
-        loss = loss.mean()
-        mean_loss +=loss
+        regression_loss = loss.mean()
+
+        logging_loss = loss[:,DIGITS*2+1:] # we log the loss from the = to the last " ". This loss should approach 0
+        mean_loss += logging_loss.mean()
 
         optimizer.zero_grad()
-        loss.backward()
+        regression_loss.backward()
         optimizer.step()
     mean_loss = mean_loss / STEPS_PER_EPOCH
     print(f"epoch {epoch} loss: {mean_loss}")
