@@ -10,15 +10,15 @@ MAX_TRAIN_NUMBER: int = 10**(DIGITS-1)-1
 TEST_PRIMES: list[int] = [5, 17, 93, 7691]
 
 SENTENCE_LENGTH = DIGITS +1+ DIGITS +1+ DIGITS+1 # add two numbers, resulting number is potentially one longer, a + and a =
-EMBEDDING_DIM = 16
-FEED_FORWARD_DIM = 32
-ATTENTION_HEADS = 1 
-ATTENTION_BLOCKS = 1
+EMBEDDING_DIM = 32
+FEED_FORWARD_DIM = 64
+ATTENTION_HEADS = 1
+ATTENTION_BLOCKS = 6
 ATTENTION_EMBEDDING_DIM = EMBEDDING_DIM // ATTENTION_HEADS
 
 EPOCHS = 30
 STEPS_PER_EPOCH = 10**3
-BATCH_SIZE = 3
+BATCH_SIZE = 100
 
 def contains_prime(number):
     for p in TEST_PRIMES:
@@ -40,18 +40,24 @@ def get_batch(numbers, size):
     target_strings = []
     for s1, s2 in batch_numbers:
         in_s = f"{s1:0{DIGITS}d}+{s2:0{DIGITS}d}={s1+s2:0{DIGITS+1}d}"
-        target_s = in_s[1:] + "□" # (close the target string with an "end token")
+        target_s = in_s[1:] + " " # (close the target string with an "end token")
         input_strings.append(in_s)
         target_strings.append(target_s)
     return input_strings, target_strings
 
+mapping = {str(i): i for i in range(10)}
+mapping['='] = 10
+mapping['+'] = 11
+mapping[' '] = 12
 def tokenize(example: str):
     chars = [*example]
-    chars = ["10" if c=="=" else c for c in chars]
-    chars = ["11" if c=="+" else c for c in chars]
-    chars = ["12" if c=="□" else c for c in chars]
-    tokens = [int(c) for c in chars]
+    tokens = [mapping[c] for c in chars]
     return tokens
+
+reverse_mapping = {value: key for key, value in mapping.items()}
+def detokenize(tokens: list[int]) -> str:
+    chars = [reverse_mapping[t] for t in tokens]
+    return "".join(chars)
 
 
 class FeedForward(nn.Module):
@@ -165,7 +171,7 @@ for epoch in range(EPOCHS):
 
         # now, since we dont want to regress before the = sign: crop it like its hot
         loss = loss.view(BATCH_SIZE, SENTENCE_LENGTH)
-        loss = loss[:,DIGITS*2+1] # we evaluate from the = to the "□" (which should always be fixed)
+        loss = loss[:,DIGITS*2+1:] # we evaluate from the = to the " " (which should always be fixed)
         loss = loss.mean()
         mean_loss +=loss
 
@@ -174,5 +180,12 @@ for epoch in range(EPOCHS):
         optimizer.step()
     mean_loss = mean_loss / STEPS_PER_EPOCH
     print(f"epoch {epoch} loss: {mean_loss}")
+
+
+NUM_INFERENCE_EXAMPLES = 10
+input, _ = get_batch(val_interpo_numbers, NUM_INFERENCE_EXAMPLES)
+for i in range(DIGITS*2+1, SENTENCE_LENGTH):
+    probs, _ = cpt(input)
+
 
 
