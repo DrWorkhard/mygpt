@@ -10,15 +10,15 @@ MAX_TRAIN_NUMBER: int = 10**(DIGITS-1)-1
 TEST_PRIMES: list[int] = [5, 17, 93, 7691]
 
 SENTENCE_LENGTH = DIGITS +1+ DIGITS +1+ DIGITS+1 # add two numbers, resulting number is potentially one longer, a + and a =
-EMBEDDING_DIM = 32
-FEED_FORWARD_DIM = 64
-ATTENTION_HEADS = 1
+EMBEDDING_DIM = 256
+FEED_FORWARD_DIM = 256
+ATTENTION_HEADS = 8
 ATTENTION_BLOCKS = 6
 ATTENTION_EMBEDDING_DIM = EMBEDDING_DIM // ATTENTION_HEADS
 
 EPOCHS = 30
 STEPS_PER_EPOCH = 10**3
-BATCH_SIZE = 100
+BATCH_SIZE = 10
 
 def contains_prime(number):
     for p in TEST_PRIMES:
@@ -74,12 +74,12 @@ class FeedForward(nn.Module):
         return x
 
 
-class Block(nn.Module):
+class AttentionBlock(nn.Module):
 
     def __init__(self):
         super().__init__()
         self.layer_norm1 = nn.LayerNorm((EMBEDDING_DIM,))
-        self.attention = Attention()
+        self.attention = MultiHeadAttention()
         self.layer_norm2 = nn.LayerNorm((EMBEDDING_DIM,))
         self.feed_forward = FeedForward()
         
@@ -92,32 +92,43 @@ class Block(nn.Module):
         return x
 
 
-class Attention(nn.Module):
+class MultiHeadAttention(nn.Module):
     # innefficient attention block
 
     def __init__(self):
         super().__init__()
-        self.to_query = nn.Linear(ATTENTION_EMBEDDING_DIM, ATTENTION_EMBEDDING_DIM, False)
-        self.to_key = nn.Linear(ATTENTION_EMBEDDING_DIM, ATTENTION_EMBEDDING_DIM, False)
-        self.to_value = nn.Linear(ATTENTION_EMBEDDING_DIM, ATTENTION_EMBEDDING_DIM, False)
+        self.to_query = nn.Linear(EMBEDDING_DIM, ATTENTION_EMBEDDING_DIM*ATTENTION_HEADS, False)
+        self.to_key = nn.Linear(EMBEDDING_DIM, ATTENTION_EMBEDDING_DIM*ATTENTION_HEADS, False)
+        self.to_value = nn.Linear(EMBEDDING_DIM, ATTENTION_EMBEDDING_DIM*ATTENTION_HEADS, False)
 
-        mask = torch.ones((1, SENTENCE_LENGTH, SENTENCE_LENGTH))
-        mask = mask.masked_fill(torch.triu(mask, 1) == 1, -torch.inf)
+        mask = torch.ones((1, 1, SENTENCE_LENGTH, SENTENCE_LENGTH))
+        mask = torch.triu(mask, 1)
+        mask = mask == 1
         self.register_buffer("mask", mask)
 
 
     def forward(self, x):
+        # karpathy uses transpose instead of movedim. Is this faster?
         q = self.to_query(x)
-        k = self.to_key(x).transpose(-2,-1)
+        k = self.to_key(x)
         v = self.to_value(x)
 
+        # split up into heads
+        q = q.view(BATCH_SIZE, SENTENCE_LENGTH, ATTENTION_HEADS, ATTENTION_EMBEDDING_DIM).movedim(1,2)
+        k = k.view(BATCH_SIZE, SENTENCE_LENGTH, ATTENTION_HEADS, ATTENTION_EMBEDDING_DIM).movedim(1,2)
+        v = v.view(BATCH_SIZE, SENTENCE_LENGTH, ATTENTION_HEADS, ATTENTION_EMBEDDING_DIM).movedim(1,2)
+
+        k = k.transpose(-2,-1)
         attention_matrix = torch.matmul(q, k) / np.sqrt(float(ATTENTION_EMBEDDING_DIM))
-        attention_matrix *= self.mask
+        attention_matrix.masked_fill(self.mask, -torch.inf)
         weights = F.softmax(attention_matrix, -1)
 
         x = torch.matmul(weights, v)
 
-        return q
+        # concat heads
+        x = x.movedim(1,2).contiguous()
+        x = x.view(BATCH_SIZE, SENTENCE_LENGTH, ATTENTION_HEADS*ATTENTION_EMBEDDING_DIM)
+        return x
 
 
 class CPT(nn.Module):
@@ -126,7 +137,7 @@ class CPT(nn.Module):
        super().__init__()
        self.token_embedding = nn.Embedding(VOCAB_SIZE, EMBEDDING_DIM)
        self.position_embeddding = nn.Embedding(SENTENCE_LENGTH, EMBEDDING_DIM)
-       self.block = Block()
+       self.block = AttentionBlock()
        self.head = nn.Linear(EMBEDDING_DIM, VOCAB_SIZE) # TODO: weight tying
 
 
