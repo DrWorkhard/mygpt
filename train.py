@@ -114,9 +114,9 @@ class MultiHeadAttention(nn.Module):
         v = self.to_value(x)
 
         # split up into heads:: BSxSLxAHxAED --> BSxAHxSLxAED
-        q = q.view(BATCH_SIZE, SENTENCE_LENGTH, ATTENTION_HEADS, ATTENTION_EMBEDDING_DIM).movedim(1,2)
-        k = k.view(BATCH_SIZE, SENTENCE_LENGTH, ATTENTION_HEADS, ATTENTION_EMBEDDING_DIM).movedim(1,2)
-        v = v.view(BATCH_SIZE, SENTENCE_LENGTH, ATTENTION_HEADS, ATTENTION_EMBEDDING_DIM).movedim(1,2)
+        q = q.view(-1, SENTENCE_LENGTH, ATTENTION_HEADS, ATTENTION_EMBEDDING_DIM).movedim(1,2)
+        k = k.view(-1, SENTENCE_LENGTH, ATTENTION_HEADS, ATTENTION_EMBEDDING_DIM).movedim(1,2)
+        v = v.view(-1, SENTENCE_LENGTH, ATTENTION_HEADS, ATTENTION_EMBEDDING_DIM).movedim(1,2)
 
         k = k.transpose(-2,-1)
         attention_matrix = torch.matmul(q, k) / np.sqrt(float(ATTENTION_EMBEDDING_DIM))
@@ -127,7 +127,7 @@ class MultiHeadAttention(nn.Module):
 
         # concat heads
         x = x.movedim(1,2).contiguous()
-        x = x.view(BATCH_SIZE, SENTENCE_LENGTH, ATTENTION_HEADS*ATTENTION_EMBEDDING_DIM)
+        x = x.view(-1, SENTENCE_LENGTH, ATTENTION_HEADS*ATTENTION_EMBEDDING_DIM)
         return x
 
 
@@ -171,32 +171,40 @@ class CPT(nn.Module):
         return out_probabilities, loss
         
 
-cpt = CPT()
-optimizer = torch.optim.AdamW(cpt.parameters())
+if __name__ == '__main__':
 
-for epoch in range(EPOCHS):
-    mean_loss = 0.
-    for _ in range(STEPS_PER_EPOCH):
-        input, target = get_batch(train_numbers, BATCH_SIZE)
-        probs, loss = cpt(input, target)
+    cpt = CPT()
+    optimizer = torch.optim.AdamW(cpt.parameters())
 
-        loss = loss.view(BATCH_SIZE, SENTENCE_LENGTH)
-        regression_loss = loss.mean()
+    min_loss = np.inf
+    for epoch in range(EPOCHS):
+        mean_loss = 0.
+        for _ in range(STEPS_PER_EPOCH):
+            input, target = get_batch(train_numbers, BATCH_SIZE)
+            probs, loss = cpt(input, target)
 
-        logging_loss = loss[:,DIGITS*2+1:] # we log the loss from the = to the last " ". This loss should approach 0
-        mean_loss += logging_loss.mean()
+            loss = loss.view(BATCH_SIZE, SENTENCE_LENGTH)
+            regression_loss = loss.mean()
 
-        optimizer.zero_grad()
-        regression_loss.backward()
-        optimizer.step()
-    mean_loss = mean_loss / STEPS_PER_EPOCH
-    print(f"epoch {epoch} loss: {mean_loss}")
+            logging_loss = loss[:,DIGITS*2+1:] # we log the loss from the = to the last " ". This loss should approach 0
+            mean_loss += logging_loss.mean()
+
+            optimizer.zero_grad()
+            regression_loss.backward()
+            optimizer.step()
+        mean_loss = mean_loss / STEPS_PER_EPOCH
+        print(f"epoch {epoch} loss: {mean_loss}")
+        if epoch > 10 and mean_loss < min_loss:
+            print("saving model")
+            torch.save({'model': cpt.state_dict(), 'optimizer': optimizer.state_dict()}, 'model_and_optimizer.ckpt')
+            min_loss = mean_loss
 
 
-NUM_INFERENCE_EXAMPLES = 10
-input, _ = get_batch(val_interpo_numbers, NUM_INFERENCE_EXAMPLES)
-for i in range(DIGITS*2+1, SENTENCE_LENGTH):
-    probs, _ = cpt(input)
+
+    NUM_INFERENCE_EXAMPLES = 10
+    input, _ = get_batch(val_interpo_numbers, NUM_INFERENCE_EXAMPLES)
+    for i in range(DIGITS*2+1, SENTENCE_LENGTH):
+        probs, _ = cpt(input)
 
 
 
