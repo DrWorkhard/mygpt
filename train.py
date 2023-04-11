@@ -1,13 +1,18 @@
+import time
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import matplotlib.pylab as plt
+
+DEVICE = torch.device("mps")
 
 VOCAB_SIZE = 10+3 # all digits plus =, +, end_token: ' '
 DIGITS: int = 5
 MAX_NUMBER: int = 10**(DIGITS)-1
 MAX_TRAIN_NUMBER: int = 10**(DIGITS-1)-1
-TEST_PRIMES: list[int] = [5, 17, 93, 7691]
+VAL_PRIMES = [17, 93, 7691]
+TEST_PRIMES: list[int] = [5]
 
 SENTENCE_LENGTH = DIGITS +1+ DIGITS +1+ DIGITS+1 # add two numbers, resulting number is potentially one longer, a + and a =
 EMBEDDING_DIM = 256
@@ -18,21 +23,40 @@ ATTENTION_EMBEDDING_DIM = EMBEDDING_DIM // ATTENTION_HEADS
 
 EPOCHS = 100
 STEPS_PER_EPOCH = 10**3
+MAX_STEPS = EPOCHS * STEPS_PER_EPOCH
+WARMUP_STEPS = 2 * STEPS_PER_EPOCH
 BATCH_SIZE = 100
+MAX_LEARNING_RATE = 6e-4
+MIN_LEARNING_RATE = 6e-5
 
-def contains_prime(number):
-    for p in TEST_PRIMES:
+def get_lr(step):
+    if step < WARMUP_STEPS:
+        return step/WARMUP_STEPS * MAX_LEARNING_RATE
+    
+    cos_interpolator = (step-WARMUP_STEPS) / (MAX_STEPS - WARMUP_STEPS)
+    lr = MIN_LEARNING_RATE + (1+np.cos(np.pi*cos_interpolator)) * (MAX_LEARNING_RATE - MIN_LEARNING_RATE) / 2.
+    assert lr > MIN_LEARNING_RATE - 10**-8
+
+    if step > MAX_STEPS: return MIN_LEARNING_RATE
+    return lr
+
+
+def contains_prime(number, primes):
+    for p in primes:
         if number % p == 0:
             return True
     return False
 
 train_numbers: list[int] = range(0, MAX_TRAIN_NUMBER+1)
-train_numbers = [n for n in train_numbers if not contains_prime(n)]
+train_numbers = [n for n in train_numbers if not contains_prime(n, TEST_PRIMES + VAL_PRIMES)]
 
 val_interpo_numbers: list[int] = range(0, MAX_TRAIN_NUMBER+1)
-val_interpo_numbers = [n for n in val_interpo_numbers if contains_prime(n)]
+val_interpo_numbers = [n for n in val_interpo_numbers if contains_prime(n, VAL_PRIMES)]
 
-val_extrapo_numbers: list[int] = list(range(MAX_TRAIN_NUMBER+1, MAX_NUMBER+1))
+test_interpo_numbers: list[int] = range(0, MAX_TRAIN_NUMBER+1)
+test_interpo_numbers = [n for n in test_interpo_numbers if contains_prime(n, TEST_PRIMES)]
+
+test_extrapo_numbers: list[int] = list(range(MAX_TRAIN_NUMBER+1, MAX_NUMBER+1))
 
 def get_batch(numbers, size):
     batch_numbers = np.random.choice(numbers, (size, 2), False)
@@ -58,6 +82,25 @@ reverse_mapping = {value: key for key, value in mapping.items()}
 def detokenize(tokens: list[int]) -> str:
     chars = [reverse_mapping[t] for t in tokens]
     return "".join(chars)
+
+
+# show 10 examples of each: train, val interpo, val extrapo
+def judge_results(numbers, howmany, model, show=True):
+  network_inputs, target = get_batch(numbers, howmany)
+  probs, _ = model(network_inputs)
+  results = probs.argmax(-1)
+  results = [detokenize(result.cpu().numpy()) for result in results]
+  results = [result[DIGITS*2+1:-1] for result in results]
+  checks = [network_input.endswith(result) for network_input, result in zip(network_inputs, results)]
+  correct = sum(checks)
+  print(f"correct: {correct} out of {howmany}")
+  if show:
+    print("first 10 as demonstration: ")
+    for i in range(10):
+        network_input, result, correct = network_inputs[i], results[i], checks[i]
+        color = "\033[92m" if correct else "\033[91m"
+        print(f"{color}input with solution: {network_input} / result: {result} / correct: {correct}\033[0m")
+  return correct
 
 
 class FeedForward(nn.Module):
@@ -113,7 +156,7 @@ class MultiHeadAttention(nn.Module):
         k = self.to_key(x)
         v = self.to_value(x)
 
-        # split up into heads:: BSxSLxAHxAED --> BSxAHxSLxAED
+        # split up into heads
         q = q.view(-1, SENTENCE_LENGTH, ATTENTION_HEADS, ATTENTION_EMBEDDING_DIM).movedim(1,2)
         k = k.view(-1, SENTENCE_LENGTH, ATTENTION_HEADS, ATTENTION_EMBEDDING_DIM).movedim(1,2)
         v = v.view(-1, SENTENCE_LENGTH, ATTENTION_HEADS, ATTENTION_EMBEDDING_DIM).movedim(1,2)
@@ -144,8 +187,8 @@ class CPT(nn.Module):
     def forward(self, examples: list[str], targets: list[str] = None):
         idx: list[list[int]] = [tokenize(example) for example in examples]
 
-        idx_tensor = torch.tensor(idx) # batch_size x sentence_length
-        position_tensor = torch.tensor(range(SENTENCE_LENGTH))
+        idx_tensor = torch.tensor(idx, device=DEVICE) # batch_size x sentence_length
+        position_tensor = torch.tensor(range(SENTENCE_LENGTH), device=DEVICE)
 
         pos = self.position_embeddding(position_tensor) # sentence_length x embeding_dimension
         x = self.token_embedding(idx_tensor) # batch_size x sentence_length x embedding_dimension
@@ -164,7 +207,7 @@ class CPT(nn.Module):
             log_softmax = F.log_softmax(x, -1)
             log_softmax_flat = log_softmax.view(-1, VOCAB_SIZE)
             expected_output_idx = [tokenize(target) for target in targets]
-            expected_output = torch.tensor(expected_output_idx)
+            expected_output = torch.tensor(expected_output_idx, device=DEVICE)
             expected_output_flat = expected_output.view(-1)
             loss = F.cross_entropy(log_softmax_flat, expected_output_flat, reduction='none')
 
@@ -174,12 +217,14 @@ class CPT(nn.Module):
 if __name__ == '__main__':
 
     cpt = CPT()
+    cpt.to(DEVICE)
     optimizer = torch.optim.AdamW(cpt.parameters())
 
-    min_loss = np.inf
+    max_correct = 0
     for epoch in range(EPOCHS):
+        start = time.time()
         mean_loss = 0.
-        for _ in range(STEPS_PER_EPOCH):
+        for step in range(STEPS_PER_EPOCH):
             input, target = get_batch(train_numbers, BATCH_SIZE)
             probs, loss = cpt(input, target)
 
@@ -191,15 +236,28 @@ if __name__ == '__main__':
 
             optimizer.zero_grad()
             regression_loss.backward()
+
+            lr = get_lr(epoch * step)
+            for g in optimizer.param_groups:
+                g['lr'] = lr
+
             optimizer.step()
         mean_loss = mean_loss / STEPS_PER_EPOCH
         print(f"epoch {epoch} loss: {mean_loss}")
-        if epoch > 10 and mean_loss < min_loss:
+
+        end = time.time()
+        epoch_duration = end-start
+        print(f"took {int(epoch_duration//60)}min {int(epoch_duration%60)}s")
+
+        correct = judge_results(val_interpo_numbers, 340, cpt, False)
+
+        if epoch > 10 and correct > max_correct:
             print("saving model")
-            torch.save({'model': cpt.state_dict(), 'optimizer': optimizer.state_dict()}, 'model_and_optimizer.ckpt')
-            min_loss = mean_loss
+            torch.save({'model': cpt.state_dict(), 'optimizer': optimizer.state_dict()}, 'model_and_optimizer_08_04_2023_val_max.ckpt')
+            max_correct = correct
 
 
+    cpt.eval()
 
     NUM_INFERENCE_EXAMPLES = 10
     input, _ = get_batch(val_interpo_numbers, NUM_INFERENCE_EXAMPLES)
